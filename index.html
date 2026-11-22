@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Świat 3D - Płyta Główna</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #020a06; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    canvas { display: block; }
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      color: #7cffb2;
+      background: rgba(2, 16, 10, 0.78);
+      border: 1px solid #1f7a4c;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+    }
+    #hud strong { color: #ffffff; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <strong>PŁYTA GŁÓWNA 3D (Generator proceduralny)</strong><br>
+    • <strong>Ruch myszką:</strong> rozglądanie się (kliknij ekran, aby obrócić o 360°)<br>
+    • <strong>W / A / S / D lub Strzałki:</strong> chodzenie po płycie<br>
+    • <strong>Przytrzymaj LPM lub Spację:</strong> ruch do przodu / skok<br>
+    <span id="coords">Sektor: 0, 0</span>
+  </div>
+
+  <script>
+    // Samowystarczalny silnik 3D WebGL (bez zewnętrznych bibliotek)
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    const gl = canvas.getContext('webgl', { antialias: true });
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Shadery WebGL
+    const vsSource = `
+      attribute vec3 aPos;
+      attribute vec3 aNorm;
+      attribute vec2 aUV;
+      uniform mat4 uProj;
+      uniform mat4 uView;
+      uniform mat4 uModel;
+      varying vec3 vNorm;
+      varying vec3 vWorldPos;
+      varying vec2 vUV;
+      void main() {
+        vec4 worldPos = uModel * vec4(aPos, 1.0);
+        vWorldPos = worldPos.xyz;
+        vNorm = mat3(uModel) * aNorm;
+        vUV = aUV;
+        gl_Position = uProj * uView * worldPos;
+      }
+    `;
+
+    const fsSource = `
+      precision mediump float;
+      varying vec3 vNorm;
+      varying vec3 vWorldPos;
+      varying vec2 vUV;
+      uniform vec3 uColor;
+      uniform vec3 uCamPos;
+      uniform int uUsePCB;
+      uniform float uTime;
+
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+
+      void main() {
+        vec3 baseColor = uColor;
+
+        if (uUsePCB == 1) {
+          vec2 uv = vWorldPos.xz * 0.5;
+          vec2 grid = abs(fract(uv) - 0.5);
+          float line = smoothstep(0.47, 0.49, max(grid.x, grid.y));
+          
+          vec2 cell = floor(uv);
+          float h = hash(cell);
+          vec2 local = fract(uv);
+          float trace = 0.0;
+          if (h > 0.35) {
+            trace = smoothstep(0.06, 0.02, abs(local.x - 0.5));
+          } else {
+            trace = smoothstep(0.06, 0.02, abs(local.y - 0.5));
+          }
+          float pad = smoothstep(0.14, 0.10, length(local - 0.5)) * step(0.75, h);
+
+          baseColor = vec3(0.02, 0.16, 0.09);
+          baseColor += vec3(0.03, 0.12, 0.07) * line;
+          baseColor = mix(baseColor, vec3(0.10, 0.52, 0.30), trace * 0.85);
+          baseColor = mix(baseColor, vec3(0.85, 0.68, 0.22), pad);
+        }
+
+        vec3 n = normalize(vNorm);
+        vec3 lightDir = normalize(vec3(0.4, 0.85, 0.35));
+        float diff = max(dot(n, lightDir), 0.0);
+        
+        // Światło gracza
+        vec3 toCam = uCamPos - vWorldPos;
+        float distCam = length(toCam);
+        float pointAtten = 1.0 / (1.0 + 0.04 * distCam * distCam);
+        float pointDiff = max(dot(n, normalize(toCam)), 0.0) * pointAtten;
+
+        vec3 lit = baseColor * (0.35 + diff * 0.75) + baseColor * vec3(0.2, 1.0, 0.75) * pointDiff * 1.2;
+
+        // Mgła głębi
+        float fogFactor = 1.0 - exp(-pow(distCam * 0.017, 2.0));
+        vec3 fogColor = vec3(0.01, 0.06, 0.035);
+        vec3 finalColor = mix(lit, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+        gl_FragColor = vec4(finalColor, 1.0);
+      }
+    `;
+
+    function compileShader(type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      return s;
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, vsSource));
+    gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSource));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+
+    const aPos = gl.getAttribLocation(prog, 'aPos');
+    const aNorm = gl.getAttribLocation(prog, 'aNorm');
+    const aUV = gl.getAttribLocation(prog, 'aUV');
+    const uProj = gl.getUniformLocation(prog, 'uProj');
+    const uView = gl.getUniformLocation(prog, 'uView');
+    const uModel = gl.getUniformLocation(prog, 'uModel');
+    const uColor = gl.getUniformLocation(prog, 'uColor');
+    const uCamPos = gl.getUniformLocation(prog, 'uCamPos');
+    const uUsePCB = gl.getUniformLocation(prog, 'uUsePCB');
+    const uTime = gl.getUniformLocation(prog, 'uTime');
+
+    // Geometria sześcianu (baza dla podzespołów i podłoża)
+    const cubeVerts = new Float32Array([
+      // Front
+      -0.5,-0.5, 0.5,  0, 0, 1,  0,0,   0.5,-0.5, 0.5,  0, 0, 1,  1,0,   0.5, 0.5, 0.5,  0, 0, 1,  1,1,
+      -0.5,-0.5, 0.5,  0, 0, 1,  0,0,   0.5, 0.5, 0.5,  0, 0, 1,  1,1,  -0.5, 0.5, 0.5,  0, 0, 1,  0,1,
+      // Back
+       0.5,-0.5,-0.5,  0, 0,-1,  0,0,  -0.5,-0.5,-0.5,  0, 0,-1,  1,0,  -0.5, 0.5,-0.5,  0, 0,-1,  1,1,
+       0.5,-0.5,-0.5,  0, 0,-1,  0,0,  -0.5, 0.5,-0.5,  0, 0,-1,  1,1,   0.5, 0.5,-0.5,  0, 0,-1,  0,1,
+      // Top
+      -0.5, 0.5, 0.5,  0, 1, 0,  0,0,   0.5, 0.5, 0.5,  0, 1, 0,  1,0,   0.5, 0.5,-0.5,  0, 1, 0,  1,1,
+      -0.5, 0.5, 0.5,  0, 1, 0,  0,0,   0.5, 0.5,-0.5,  0, 1, 0,  1,1,  -0.5, 0.5,-0.5,  0, 1, 0,  0,1,
+      // Bottom
+      -0.5,-0.5,-0.5,  0,-1, 0,  0,0,   0.5,-0.5,-0.5,  0,-1, 0,  1,0,   0.5,-0.5, 0.5,  0,-1, 0,  1,1,
+      -0.5,-0.5,-0.5,  0,-1, 0,  0,0,   0.5,-0.5, 0.5,  0,-1, 0,  1,1,  -0.5,-0.5, 0.5,  0,-1, 0,  0,1,
+      // Right
+       0.5,-0.5, 0.5,  1, 0, 0,  0,0,   0.5,-0.5,-0.5,  1, 0, 0,  1,0,   0.5, 0.5,-0.5,  1, 0, 0,  1,1,
+       0.5,-0.5, 0.5,  1, 0, 0,  0,0,   0.5, 0.5,-0.5,  1, 0, 0,  1,1,   0.5, 0.5, 0.5,  1, 0, 0,  0,1,
+      // Left
+      -0.5,-0.5,-0.5, -1, 0, 0,  0,0,  -0.5,-0.5, 0.5, -1, 0, 0,  1,0,  -0.5, 0.5, 0.5, -1, 0, 0,  1,1,
+      -0.5,-0.5,-0.5, -1, 0, 0,  0,0,  -0.5, 0.5, 0.5, -1, 0, 0,  1,1,  -0.5, 0.5,-0.5, -1, 0, 0,  0,1
+    ]);
+
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, cubeVerts, gl.STATIC_DRAW);
+
+    const stride = 8 * 4;
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(aNorm);
+    gl.vertexAttribPointer(aNorm, 3, gl.FLOAT, false, stride, 3 * 4);
+    gl.enableVertexAttribArray(aUV);
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, stride, 6 * 4);
+
+    // Matematyka macierzy 4x4
+    function mat4Perspective(fov, aspect, near, far) {
+      const f = 1.0 / Math.tan(fov / 2);
+      const nf = 1 / (near - far);
+      return new Float32Array([
+        f / aspect, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (far + near) * nf, -1,
+        0, 0, (2 * far * near) * nf, 0
+      ]);
+    }
+
+    function mat4View(x, y, z, yaw, pitch) {
+      const cy = Math.cos(-yaw), sy = Math.sin(-yaw);
+      const cp = Math.cos(-pitch), sp = Math.sin(-pitch);
+      const m = new Float32Array(16);
+      m[0] = cy;        m[1] = sy * sp;   m[2] = sy * cp;   m[3] = 0;
+      m[4] = 0;         m[5] = cp;        m[6] = -sp;       m[7] = 0;
+      m[8] = -sy;       m[9] = cy * sp;   m[10] = cy * cp;  m[11] = 0;
+      m[12] = -(m[0]*x + m[4]*y + m[8]*z);
+      m[13] = -(m[1]*x + m[5]*y + m[9]*z);
+      m[14] = -(m[2]*x + m[6]*y + m[10]*z);
+      m[15] = 1;
+      return m;
+    }
+
+    function mat4TRS(tx, ty, tz, sx, sy, sz, rotY = 0) {
+      const c = Math.cos(rotY), s = Math.sin(rotY);
+      return new Float32Array([
+        sx * c, 0, -sx * s, 0,
+        0, sy, 0, 0,
+        sz * s, 0, sz * c, 0,
+        tx, ty, tz, 1
+      ]);
+    }
+
+    function drawBox(tx, ty, tz, sx, sy, sz, color, usePCB = 0, rotY = 0) {
+      gl.uniformMatrix4fv(uModel, false, mat4TRS(tx, ty, tz, sx, sy, sz, rotY));
+      gl.uniform3fv(uColor, color);
+      gl.uniform1i(uUsePCB, usePCB);
+      gl.drawArrays(gl.TRIANGLES, 0, 36);
+    }
+
+    // Deterministyczny generator losowy
+    function seededRandom(x, z, seed) {
+      const n = Math.sin(x * 127.1 + z * 311.7 + seed * 74.7) * 43758.5453123;
+      return n - Math.floor(n);
+    }
+
+    const CHUNK_SIZE = 24;
+    const RENDER_DIST = 3;
+    const chunks = new Map();
+
+    function getChunk(cx, cz) {
+      const key = `${cx},${cz}`;
+      if (chunks.has(key)) return chunks.get(key);
+
+      const items = [];
+      const bx = cx * CHUNK_SIZE;
+      const bz = cz * CHUNK_SIZE;
+
+      for (let i = 0; i < 7; i++) {
+        const rx = bx + (seededRandom(cx, cz, i * 3 + 1) - 0.5) * (CHUNK_SIZE - 5);
+        const rz = bz + (seededRandom(cx, cz, i * 3 + 2) - 0.5) * (CHUNK_SIZE - 5);
+        const type = seededRandom(cx, cz, i * 3 + 3);
+
+        if (type < 0.45) {
+          // Mikroprocesor + złote nóżki
+          const w = 2.2 + seededRandom(cx, cz, i + 10) * 2.4;
+          const d = 2.2 + seededRandom(cx, cz, i + 20) * 2.4;
+          const h = 0.55 + seededRandom(cx, cz, i + 30) * 0.45;
+          items.push({ kind: 'chip', x: rx, z: rz, w, h, d });
+        } else if (type < 0.8) {
+          // Kondensator
+          const r = 0.9 + seededRandom(cx, cz, i + 40) * 0.8;
+          const h = 1.6 + seededRandom(cx, cz, i + 50) * 2.0;
+          items.push({ kind: 'cap', x: rx, z: rz, r, h });
+        } else {
+          // Radiator z wentylatorem
+          items.push({ kind: 'cooler', x: rx, z: rz });
+        }
+      }
+
+      const chunkData = { cx, cz, bx, bz, items };
+      chunks.set(key, chunkData);
+      return chunkData;
+    }
+
+    // Impulsy danych
+    const pulses = [];
+    for (let i = 0; i < 45; i++) {
+      pulses.push({
+        x: (Math.random() - 0.5) * 80,
+        z: (Math.random() - 0.5) * 80,
+        axis: Math.random() > 0.5 ? 'x' : 'z',
+        speed: (Math.random() * 14 + 8) * (Math.random() > 0.5 ? 1 : -1)
+      });
+    }
+
+    // Sterowanie
+    const cam = { x: 0, y: 2.2, z: 5, yaw: 0, pitch: -0.1, targetYaw: 0, targetPitch: -0.1, vy: 0 };
+    let isMouseDown = false;
+    const keys = {};
+
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    canvas.addEventListener('mousedown', () => {
+      isMouseDown = true;
+      if (document.pointerLockElement !== canvas && canvas.requestPointerLock) {
+        canvas.requestPointerLock();
+      }
+    });
+    window.addEventListener('mouseup', () => isMouseDown = false);
+
+    window.addEventListener('mousemove', e => {
+      if (document.pointerLockElement === canvas) {
+        cam.targetYaw -= e.movementX * 0.0025;
+        cam.targetPitch -= e.movementY * 0.0025;
+      } else {
+        const nx = (e.clientX / window.innerWidth) * 2 - 1;
+        const ny = (e.clientY / window.innerHeight) * 2 - 1;
+        cam.targetYaw = -nx * 1.5;
+        cam.targetPitch = -ny * 0.55;
+      }
+      cam.targetPitch = Math.max(-1.35, Math.min(1.35, cam.targetPitch));
+    });
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.clearColor(0.01, 0.06, 0.035, 1.0);
+
+    let lastTime = performance.now();
+    const coordsEl = document.getElementById('coords');
+
+    function render(now) {
+      const dt = Math.min((now - lastTime) * 0.001, 0.1);
+      lastTime = now;
+
+      cam.yaw += (cam.targetYaw - cam.yaw) * 0.12;
+      cam.pitch += (cam.targetPitch - cam.pitch) * 0.12;
+
+      const speed = 11 * dt;
+      const fx = -Math.sin(cam.yaw), fz = -Math.cos(cam.yaw);
+      const rx = Math.cos(cam.yaw), rz = -Math.sin(cam.yaw);
+
+      if (keys['KeyW'] || keys['ArrowUp'] || isMouseDown) { cam.x += fx * speed; cam.z += fz * speed; }
+      if (keys['KeyS'] || keys['ArrowDown']) { cam.x -= fx * speed; cam.z -= fz * speed; }
+      if (keys['KeyA'] || keys['ArrowLeft']) { cam.x -= rx * speed; cam.z -= rz * speed; }
+      if (keys['KeyD'] || keys['ArrowRight']) { cam.x += rx * speed; cam.z += rz * speed; }
+
+      if (keys['Space'] && cam.y <= 2.21) cam.vy = 7.5;
+      cam.y += cam.vy * dt;
+      if (cam.y > 2.2) cam.vy -= 18 * dt;
+      else { cam.y = 2.2; cam.vy = 0; }
+
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      const proj = mat4Perspective(1.15, canvas.width / canvas.height, 0.1, 140);
+      const view = mat4View(cam.x, cam.y, cam.z, cam.yaw, cam.pitch);
+      gl.uniformMatrix4fv(uProj, false, proj);
+      gl.uniformMatrix4fv(uView, false, view);
+      gl.uniform3f(uCamPos, cam.x, cam.y, cam.z);
+      gl.uniform1f(uTime, now * 0.001);
+
+      const currentCX = Math.round(cam.x / CHUNK_SIZE);
+      const currentCZ = Math.round(cam.z / CHUNK_SIZE);
+      coordsEl.textContent = `Sektor: ${currentCX}, ${currentCZ}`;
+
+      for (let x = currentCX - RENDER_DIST; x <= currentCX + RENDER_DIST; x++) {
+        for (let z = currentCZ - RENDER_DIST; z <= currentCZ + RENDER_DIST; z++) {
+          const ch = getChunk(x, z);
+          // Podłoże PCB
+          drawBox(ch.bx, -0.1, ch.bz, CHUNK_SIZE, 0.2, CHUNK_SIZE, [0.03, 0.18, 0.10], 1);
+
+          for (const it of ch.items) {
+            if (it.kind === 'chip') {
+              drawBox(it.x, it.h * 0.5, it.z, it.w, it.h, it.d, [0.09, 0.10, 0.12]);
+              // Złote piny
+              for (let p = -it.w * 0.5 + 0.35; p < it.w * 0.5 - 0.2; p += 0.5) {
+                drawBox(it.x + p, 0.1, it.z + it.d * 0.5 + 0.15, 0.15, 0.2, 0.35, [0.90, 0.72, 0.25]);
+                drawBox(it.x + p, 0.1, it.z - it.d * 0.5 - 0.15, 0.15, 0.2, 0.35, [0.90, 0.72, 0.25]);
+              }
+            } else if (it.kind === 'cap') {
+              drawBox(it.x, it.h * 0.5, it.z, it.r, it.h, it.r, [0.07, 0.16, 0.28]);
+              drawBox(it.x, it.h + 0.04, it.z, it.r * 0.92, 0.08, it.r * 0.92, [0.80, 0.85, 0.88]);
+            } else if (it.kind === 'cooler') {
+              drawBox(it.x, 2.1, it.z, 3.2, 4.2, 3.2, [0.75, 0.80, 0.84]);
+              drawBox(it.x, 2.5, it.z + 1.65, 2.6, 0.25, 0.25, [0.0, 1.0, 0.8], 0, now * 0.005);
+            }
+          }
+        }
+      }
+
+      // Rysowanie impulsów danych
+      for (const p of pulses) {
+        p[p.axis] += p.speed * dt;
+        if (Math.abs(p[p.axis] - cam[p.axis]) > 55) {
+          p.x = cam.x + (Math.random() - 0.5) * 80;
+          p.z = cam.z + (Math.random() - 0.5) * 80;
+        }
+        const sx = p.axis === 'x' ? 1.4 : 0.25;
+        const sz = p.axis === 'z' ? 1.4 : 0.25;
+        drawBox(p.x, 0.08, p.z, sx, 0.12, sz, [0.0, 1.0, 0.8]);
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
